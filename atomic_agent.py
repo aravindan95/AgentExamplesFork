@@ -8,11 +8,8 @@ from pydantic import Field
 from prompts import role, goal, instructions, knowledge
 
 # Atomic Agents imports
-from atomic_agents.agents.base_agent import BaseAgent, BaseAgentConfig
-from atomic_agents.lib.base.base_io_schema import BaseIOSchema
-from atomic_agents.lib.components.agent_memory import AgentMemory
-from atomic_agents.lib.components.system_prompt_generator import SystemPromptGenerator
-from atomic_agents.lib.base.base_tool import BaseTool
+from atomic_agents import AtomicAgent, AgentConfig, BaseIOSchema, BaseTool
+from atomic_agents.context import ChatHistory, SystemPromptGenerator
 
 # Tavily client for web search
 from tavily import TavilyClient
@@ -50,6 +47,10 @@ class WebSearchToolOutputSchema(BaseIOSchema):
     """Output Schema for the web search tool. A string containing the search results."""
     results: str = Field(..., description="The search results.")
 
+class SystemMessageSchema(BaseIOSchema):
+    """Schema for system messages added to chat history."""
+    message: str = Field(..., description="The system message content.")
+
 class Agent:
     def __init__(self, model: str = "gpt-4o-mini"):
         """
@@ -71,7 +72,9 @@ class Agent:
             ],
         )
         self.tools = self._create_tools()
-        self.agent = self._create_orchestrator_agent(model)
+        # Create two agents for v2.0 - one for tool selection, one for final answers
+        self.orchestrator_agent = self._create_orchestrator_agent(model)
+        self.answer_agent = self._create_answer_agent(model)
 
     @staticmethod
     def date_tool() -> str:
@@ -114,19 +117,29 @@ class Agent:
 
         return {"date": DateTool(), "web_search": WebSearchTool()}
 
-    def _create_orchestrator_agent(self, model: str) -> BaseAgent:
+    def _create_orchestrator_agent(self, model: str) -> AtomicAgent:
         """
-        Create the orchestrator agent.
+        Create the orchestrator agent for tool selection.
         """
-        config = BaseAgentConfig(
+        config = AgentConfig(
             client=self.client,
             model=model,
             system_prompt_generator=self.system_prompt,
-            input_schema=OrchestratorInputSchema,
-            output_schema=OrchestratorOutputSchema,
-            memory=AgentMemory(max_messages=100),
+            history=ChatHistory(),
         )
-        return BaseAgent(config)
+        return AtomicAgent[OrchestratorInputSchema, OrchestratorOutputSchema](config)
+
+    def _create_answer_agent(self, model: str) -> AtomicAgent:
+        """
+        Create the answer agent for generating final responses.
+        """
+        config = AgentConfig(
+            client=self.client,
+            model=model,
+            system_prompt_generator=self.system_prompt,
+            history=ChatHistory(),
+        )
+        return AtomicAgent[OrchestratorInputSchema, FinalAnswerSchema](config)
 
     def chat(self, message: str) -> str:
         """
@@ -134,26 +147,32 @@ class Agent:
         """
         try:
             input_schema = OrchestratorInputSchema(chat_message=message)
-            tool_selection = self.agent.run(input_schema)
 
+            # Use orchestrator agent to select tool
+            tool_selection = self.orchestrator_agent.run(input_schema)
+
+            # Execute the selected tool and add output to both agents' histories
             if tool_selection.tool == "date":
                 tool_output = self.tools["date"].run()
-                self.agent.memory.add_message("system", tool_output)
+                tool_message = SystemMessageSchema(message=f"Date tool result: {tool_output.result}")
+                self.orchestrator_agent.history.add_message("system", tool_message)
+                self.answer_agent.history.add_message("system", tool_message)
             elif tool_selection.tool == "web_search":
                 params = WebSearchToolInputSchema(
                     query=tool_selection.tool_parameters.get('query', message)
                 )
                 tool_output = self.tools["web_search"].run(params)
-                self.agent.memory.add_message("system", tool_output)
+                tool_message = SystemMessageSchema(message=f"Web search results: {tool_output.results}")
+                self.orchestrator_agent.history.add_message("system", tool_message)
+                self.answer_agent.history.add_message("system", tool_message)
             else:
-                # Override unexpected tool selections
-                tool_selection.tool = "none"
-                no_tool = FinalAnswerSchema(final_answer="I can answer this questions without a tool.")
-                self.agent.memory.add_message("system", no_tool)
+                # No tool needed
+                no_tool_message = SystemMessageSchema(message="No tool is needed to answer this question.")
+                self.orchestrator_agent.history.add_message("system", no_tool_message)
+                self.answer_agent.history.add_message("system", no_tool_message)
 
-            self.agent.output_schema = FinalAnswerSchema
-            final_answer = self.agent.run(input_schema)
-            self.agent.output_schema = OrchestratorOutputSchema
+            # Use answer agent to generate final response
+            final_answer = self.answer_agent.run(input_schema)
 
             return final_answer.final_answer
 
@@ -166,7 +185,9 @@ class Agent:
         Reset the conversation context.
         """
         try:
-            self.agent.memory = AgentMemory(max_messages=100)
+            # Reset both agents' histories
+            self.orchestrator_agent.history = ChatHistory()
+            self.answer_agent.history = ChatHistory()
             return True
         except Exception as e:
             print(f"Error clearing chat: {e}")

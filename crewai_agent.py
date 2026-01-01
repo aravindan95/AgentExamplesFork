@@ -4,10 +4,12 @@ from datetime import date
 from tavily import TavilyClient
 import json
 
-# CrewAI imports
+# CrewAI imports (1.0+)
 from crewai import Agent as CrewAIAgent
 from crewai import Task, Crew
-from langchain_community.tools import tool
+from crewai.tools import BaseTool
+
+# Prompt components
 from prompts import role, goal, instructions, knowledge
 
 # Load environment variables
@@ -16,6 +18,21 @@ load_dotenv()
 # Initialize Tavily client
 tavily_api_key = os.getenv("TAVILY_API_KEY")
 tavily_client = TavilyClient(api_key=tavily_api_key)
+
+class _DateTool(BaseTool):
+    name: str = "Get Current Date"
+    description: str = "Function to get the current date."
+
+    def _run(self):
+        return Agent.date_tool()
+
+
+class _WebSearchTool(BaseTool):
+    name: str = "Web Search"
+    description: str = "Search the web for a query and return results."
+
+    def _run(self, query: str):
+        return Agent.web_search(query)
 
 
 class Agent:
@@ -27,35 +44,25 @@ class Agent:
             model (str): The language model to use
         """
         self.name = "CrewAI Agent"
-        # Create tools
-        self.tools = self._create_tools()
 
-        # Create the CrewAI agent
-        self.agent = self._create_crewai_agent(model)
+        self._tools = self._create_tools()
 
-        # Create a generic task for the agent
-        self.task = Task(
-            description=("Answer the user's query comprehensively, using tools when necessary. "
-                         "This is the conversation history: {history}"
-                         "This is the user's latest query: {query}"),
-            expected_output="A clear, well-formatted answer, incorporating tool results when appropriate.",
-            agent=self.agent
-        )
-
-        # Create the crew
-        self.crew = Crew(
-            agents=[self.agent],
-            tasks=[self.task],
+        self._agent = CrewAIAgent(
+            role=role,
+            goal="\n".join([goal, instructions]),
+            backstory=knowledge,
+            tools=self._tools,
+            llm=model,
             verbose=False
         )
 
-        # Conversation history
-        self.messages = []
+        # Explicit conversation history (framework-agnostic)
+        self._messages = []
 
     @staticmethod
     def date_tool():
         """
-        Function to get the current date. This tool takes no arguments.
+        Function to get the current date.
         """
         today = date.today()
         return today.strftime("%B %d, %Y")
@@ -64,56 +71,17 @@ class Agent:
     def web_search(query):
         """
         This function searches the web for the given query and returns the results.
-        The tool takes a search string as a parameter.
         """
-        # Call Tavily's search and dump the results as a JSON string
         search_response = tavily_client.search(query)
-        results = json.dumps(search_response.get('results', []))
+        results = json.dumps(search_response.get("results", []))
         print(f"Web Search Results for '{query}':")
         print(results)
         return results
 
     def _create_tools(self):
-        """
-        Create tools for the agent.
+        return [_DateTool(), _WebSearchTool()]
 
-        Returns:
-            List of tools
-        """
 
-        @tool("Get Current Date")
-        def date_tool_wrapper():
-            """Tool to get the current date. This tool takes no arguments."""
-            return self.date_tool()
-
-        @tool("Web Search")
-        def web_search_wrapper(query: str):
-            """
-            This tool searches the web for the given query and returns the results.
-            The tool takes a search string as a parameter.
-            """
-            return self.web_search(query)
-
-        return [date_tool_wrapper, web_search_wrapper]
-
-    def _create_crewai_agent(self, model):
-        """
-        Create a CrewAI agent with the specified configuration.
-
-        Args:
-            model (str): The language model to use
-
-        Returns:
-            CrewAI Agent
-        """
-        return CrewAIAgent(
-            role=role,
-            goal="\n".join([goal,instructions]),
-            backstory=knowledge,
-            tools=self.tools,
-            verbose=False,
-            llm=model
-        )
 
     def chat(self, message):
         """
@@ -126,18 +94,44 @@ class Agent:
             str: Assistant's response
         """
         try:
-            # Kickoff the crew with the user's query
-            response = self.crew.kickoff(inputs={"query": message, "history": self.messages})
+            task = Task(
+                description=(
+                    "Answer the user's query using the provided tools when helpful.\n\n"
+                    "Conversation history:\n{history}\n\n"
+                    "User query:\n{query}"
+                ),
+                expected_output=(
+                    "A clear, well-structured response that directly answers the user's query."
+                ),
+                agent=self._agent
+            )
 
-            # Maintain conversation history
-            self.messages.append({"role": "user", "content": str(message)})
-            self.messages.append({"role": "assistant", "content": str(response)})
+            crew = Crew(
+                agents=[self._agent],
+                tasks=[task],
+                verbose=False
+            )
 
-            return response
+            response = crew.kickoff(
+                inputs={
+                    "query": message,
+                    "history": self._messages
+                }
+            )
+
+            # Update history
+            self._messages.append({"role": "user", "content": message})
+            self._messages.append({"role": "assistant", "content": str(response)})
+
+            return str(response)
 
         except Exception as e:
             print(f"Error in chat: {e}")
-            return "Sorry, I encountered an error processing your request."
+            return "System Error: Unable to process request."
+
+    # ------------------------------------------------------------------
+    # Clear chat
+    # ------------------------------------------------------------------
 
     def clear_chat(self):
         """
@@ -147,16 +141,7 @@ class Agent:
             bool: True if reset was successful
         """
         try:
-            # Reset messages
-            self.messages = []
-
-            # Recreate the crew to ensure a fresh state
-            self.crew = Crew(
-                agents=[self.agent],
-                tasks=[self.task],
-                verbose=False
-            )
-
+            self._messages = []
             return True
         except Exception as e:
             print(f"Error clearing chat: {e}")
@@ -171,7 +156,7 @@ def main():
 
     while True:
         query = input("You: ")
-        if query.lower() in ['exit', 'quit']:
+        if query.lower() == 'exit':
             break
 
         response = agent.chat(query)

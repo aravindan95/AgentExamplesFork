@@ -1,3 +1,4 @@
+# THIS AGENT IS DEPRECATED AND IS ONLY HERE TO DEMONSTRATE HOW THINGS USED TO BE DONE IN 2024.
 import os
 from dotenv import load_dotenv
 from datetime import date

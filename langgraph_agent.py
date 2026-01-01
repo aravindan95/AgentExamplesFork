@@ -8,10 +8,9 @@ import json
 from typing import Annotated, TypedDict
 from langgraph.graph.message import add_messages
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.prebuilt import create_react_agent
+from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
 from langchain_core.tools import Tool
-from langchain_core.prompts import ChatPromptTemplate
 
 # Prompt components
 from prompts import role, goal, instructions, knowledge
@@ -46,8 +45,8 @@ class Agent:
         # Memory will be checkpointed per thread. We will start with thread id 1.
         self.thread_id = 1
 
-        # Create the prompt
-        self.prompt = self._create_prompt()
+        # Create the system prompt
+        self.system_prompt = "\n".join([role, goal, instructions, knowledge])
 
         # Initialize the language model
         self.llm = ChatOpenAI(
@@ -57,10 +56,10 @@ class Agent:
         )
 
         # Create the agent graph
-        self.graph = create_react_agent(
+        self.graph = create_agent(
             model=self.llm,
             tools=self.tools,
-            prompt=self.prompt,
+            system_prompt=self.system_prompt,
             checkpointer=self.memory
         )
 
@@ -104,18 +103,6 @@ class Agent:
                 description="Useful for searching the web for information"
             )
         ]
-
-    def _create_prompt(self):
-        """
-        Create a comprehensive prompt for the agent.
-
-        Returns:
-            ChatPromptTemplate
-        """
-        return ChatPromptTemplate.from_messages([
-            ("system", "\n".join([role, goal, instructions, knowledge])),
-            ("placeholder", "{messages}"),
-        ])
 
     def _inc_thread_id(self):
         """

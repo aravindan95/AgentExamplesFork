@@ -3,9 +3,7 @@ from dotenv import load_dotenv
 from datetime import date
 from tavily import TavilyClient
 import json
-
-# Pydantic AI imports
-from pydantic_ai import Agent as PydanticAgent, RunContext
+from agents import Agent as SDKAgent, function_tool, Runner
 from prompts import role, goal, instructions, knowledge
 
 # Load environment variables
@@ -15,31 +13,30 @@ load_dotenv()
 tavily_api_key = os.getenv("TAVILY_API_KEY")
 tavily_client = TavilyClient(api_key=tavily_api_key)
 
+
 class Agent:
     def __init__(self, model="gpt-4o-mini"):
         """
-        Initialize the Pydantic AI agent.
+        Initialize the OpenAI Agents SDK agent.
 
         Args:
             model (str): The language model to use
         """
-        self.name = "Pydantic Agent"
-        # Create the agent with a comprehensive system prompt
-        self.agent = PydanticAgent(
-            f'openai:{model}',
-            system_prompt="\n".join([
-                role,
-                goal,
-                instructions,
-                knowledge
-            ])
+        self.name = "OpenAI Agents SDK Agent"
+        self.model = model
+        self.runner = Runner()
+        self.conversation_history = []
+
+        # Combine system instructions
+        self.system_instructions = "\n".join([role, goal, instructions, knowledge])
+
+        # Create the SDK agent with tools
+        self.sdk_agent = SDKAgent(
+            name="Decision Support Agent",
+            instructions=self.system_instructions,
+            model=self.model,
+            tools=[self._create_date_tool(), self._create_web_search_tool()]
         )
-
-        # Register tools
-        self._register_tools()
-
-        # Conversation history
-        self.messages = []
 
     @staticmethod
     def date_tool():
@@ -60,19 +57,26 @@ class Agent:
         print(results)
         return results
 
-    def _register_tools(self):
-        """
-        Register tools with the Pydantic AI agent.
-        """
-        @self.agent.tool
-        async def date(ctx: RunContext) -> str:
-            """Get the current date"""
-            return Agent.date_tool()
+    def _create_date_tool(self):
+        """Create the date tool for the SDK agent."""
+        @function_tool
+        def date():
+            """Get the current date."""
+            return self.date_tool()
+        return date
 
-        @self.agent.tool
-        async def web_search_tool(ctx: RunContext, query: str) -> str:
-            """Search the web for information"""
+    def _create_web_search_tool(self):
+        """Create the web search tool for the SDK agent."""
+        @function_tool
+        def web_search(query: str):
+            """
+            Search the web for information.
+
+            Args:
+                query: The search query string
+            """
             return Agent.web_search(query)
+        return web_search
 
     def chat(self, message):
         """
@@ -85,16 +89,22 @@ class Agent:
             str: Assistant's response
         """
         try:
-            # Use run_sync() for proper async handling
-            result = self.agent.run_sync(
-                message,
-                message_history=self.messages
+            # Add user message to conversation history
+            self.conversation_history.append({"role": "user", "content": message})
+
+            # Run the agent with conversation history
+            result = self.runner.run_sync(
+                starting_agent=self.sdk_agent,
+                input=self.conversation_history
             )
 
-            # Maintain conversation history
-            self.messages.extend(result.new_messages())
+            # Extract the final output
+            response_text = str(result.final_output)
 
-            return result.output
+            # Add assistant response to conversation history
+            self.conversation_history.append({"role": "assistant", "content": response_text})
+
+            return response_text
 
         except Exception as e:
             print(f"Error in chat: {e}")
@@ -108,7 +118,7 @@ class Agent:
             bool: True if reset was successful
         """
         try:
-            self.messages = []
+            self.conversation_history = []
             return True
         except Exception as e:
             print(f"Error clearing chat: {e}")
