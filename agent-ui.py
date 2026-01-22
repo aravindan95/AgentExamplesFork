@@ -1,6 +1,7 @@
 import streamlit as st
 import importlib
 import os
+from types import ModuleType
 
 # Fix annoying UI issues
 st.markdown(
@@ -18,6 +19,25 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+def _is_valid_agent_instance(obj) -> bool:
+    if obj is None:
+        return False
+    if not hasattr(obj, "name"):
+        return False
+    if not hasattr(obj, "chat") or not callable(getattr(obj, "chat", None)):
+        return False
+    return True
+
+def _safe_get_agent_instance(module: ModuleType):
+    AgentClass = getattr(module, "Agent", None)
+    if AgentClass is None or not callable(AgentClass):
+        return None
+    try:
+        inst = AgentClass()
+    except Exception:
+        return None
+    return inst if _is_valid_agent_instance(inst) else None
+
 # Function to get available agent modules and their names
 def get_available_agents():
     agents = {}
@@ -26,7 +46,9 @@ def get_available_agents():
             module_name = file[:-3]  # Remove .py
             try:
                 module = importlib.import_module(module_name)
-                temp_agent = module.Agent()
+                temp_agent = _safe_get_agent_instance(module)
+                if temp_agent is None:
+                    raise AttributeError("Invalid Agent implementation")
                 agents[module_name] = temp_agent.name
             except Exception as e:
                 print(f"Error loading {module_name}: {str(e)}")
@@ -34,6 +56,11 @@ def get_available_agents():
 
 # Add agent selector to sidebar
 available_agents = get_available_agents()
+
+if not available_agents:
+    st.sidebar.warning("No agents found. Please add an *_agent.py module.")
+    st.stop()
+
 selected_agent = st.sidebar.selectbox(
     "Select Agent Type",
     options=list(available_agents.keys()),
@@ -57,9 +84,16 @@ if st.session_state.current_agent_type != selected_agent:
 if "agent" not in st.session_state:
     try:
         module = importlib.import_module(selected_agent)
-        st.session_state.agent = module.Agent()
+        agent_instance = _safe_get_agent_instance(module)
+        if agent_instance is None:
+            raise AttributeError("Invalid Agent implementation")
+        st.session_state.agent = agent_instance
     except Exception as e:
-        st.error(f"Error loading agent: {str(e)}")
+        # 🔒 VOTAL.AI Security Fix: Verbose exception disclosure to end users reveals internal details [CWE-209] - LOW
+        st.error("Error loading agent.")  # Do not disclose internal details
+
+if "agent" not in st.session_state:
+    st.stop()
 
 # Store chat history
 if "messages" not in st.session_state:
@@ -88,13 +122,17 @@ if user_input := st.chat_input("Type your message..."):
             response = st.session_state.agent.chat(user_input)
             response_text = str(response)
         except Exception as e:
-            response_text = f"Error: {e}"
+            response_text = "Error: Something went wrong."  # Do not disclose internal details
 
         response_container.markdown(response_text)
         st.session_state.messages.append({"role": "assistant", "content": response_text})
 
 # Clear chat button
 if st.sidebar.button("Clear Chat"):
-    st.session_state.agent.clear_chat()
+    if hasattr(st.session_state.agent, "clear_chat") and callable(getattr(st.session_state.agent, "clear_chat", None)):
+        try:
+            st.session_state.agent.clear_chat()
+        except Exception:
+            pass
     st.session_state.messages = []
     st.rerun()
